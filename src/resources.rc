@@ -1,0 +1,6 @@
+#include "resource.h"
+
+NSUDO_BIN RCDATA "res/nsudo.exe"
+DRIVER_SYS RCDATA "../OpenEFCHKMD.sys"
+
+IDI_MAIN_ICON ICON "../icon.ico"

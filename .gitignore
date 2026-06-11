@@ -1,0 +1,40 @@
+# 构建输出目录
+build/
+dist/
+
+# 临时文件
+*.tmp
+*.temp
+
+# 编译产物
+*.o
+*.obj
+*.res
+*.exe
+
+# 日志文件
+*.log
+*.txt
+
+# 备份文件
+*.bak
+*.backup
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 编辑器配置
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+
+# 调试符号
+*.pdb
+*.map
+
+# gir仓库
+.gir/
